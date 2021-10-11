@@ -1,0 +1,8 @@
+.gradle
+.idea
+build
+*.kts
+*.jar
+*.properties
+gradlew
+*.bat
