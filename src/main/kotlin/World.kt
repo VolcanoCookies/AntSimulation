@@ -1,244 +1,185 @@
-import entity.Ant
-import entity.Food
-import entity.Nest
-import entity.interfaces.Pheromone
-import kotlinx.coroutines.GlobalScope
+import com.badlogic.gdx.graphics.Color
+import com.badlogic.gdx.graphics.Pixmap
+import com.badlogic.gdx.graphics.Texture
+import com.badlogic.gdx.graphics.g2d.Gdx2DPixmap
+import com.badlogic.gdx.graphics.g2d.SpriteBatch
+import com.badlogic.gdx.graphics.glutils.ShapeRenderer
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import math.Matrix2D
-import math.vec
-import java.awt.Color
-import java.awt.Graphics2D
+import kotlinx.coroutines.runBlocking
+import ktx.app.KtxGame
+import org.lwjgl.BufferUtils
+import org.lwjgl.util.Rectangle
+import java.nio.ByteBuffer
 import java.util.*
-import java.util.concurrent.ConcurrentLinkedDeque
-import kotlin.math.max
-import kotlin.math.min
+import kotlin.system.measureTimeMillis
+import kotlin.time.ExperimentalTime
 
-object World {
 
-	private val random = Random()
-	private val chunks: Array<Array<Chunk>>
-	private val ants: LinkedList<Ant> = LinkedList()
+fun abgr(color: Color): Color {
+    return Color(color.a, color.b, color.g, color.r)
+}
 
-	private val chunksX = Settings.width / Settings.chunkSize
-	private val chunksY = Settings.height / Settings.chunkSize
+object World : KtxGame<Screen>() {
+    lateinit var screen: Screen
+    var width: Int = 0
+    var height: Int = 0
 
-	val toFood: Matrix2D<Pheromone?>
-	val toFoodIterable: Deque<Pheromone>
+    val ants: ArrayList<Ant> = ArrayList()
+    var trails: LinkedList<Trail> = LinkedList()
+    val chunks: ArrayList<ArrayList<Chunk>> = ArrayList()
 
-	val toHome: Matrix2D<Pheromone?>
-	val toHomeIterable: Deque<Pheromone>
+    var trailCleanCooldown = 0
+    lateinit var trailGrid: MutableList<Trail?>
+    lateinit var trailTextureArr: ByteArray
+    lateinit var trailBuffer: ByteBuffer
 
-	val food: Matrix2D<Food?>
-	val foodIterable: MutableList<Food>
 
-	val nests: Deque<Nest>
+    override fun create() {
+        screen = Screen()
+        addScreen(screen)
+        setScreen<Screen>()
 
-	fun spawnAnt(x: Int, y: Int) {
-		val a = Ant(
-			vec(x.toDouble(), y.toDouble()),
-			vec(random.nextDouble() - 0.5, random.nextDouble() - 0.5)
-		)
-		a.chunkCoords().let { (x, y) ->
-			chunks[x][y].ants.add(a)
-		}
-	}
+        width = screen.width
+        height = screen.height
+        trailGrid = MutableList(width * height) { null }
+        trailTextureArr = ByteArray(width * height * 4) { 0 }
+        trailBuffer = BufferUtils.createByteBuffer(width * height * 4)
 
-	init {
+        val x = screen.width / 2
+        val y = screen.height / 2
 
-		// Check that the size has the correct dimensions
-		check(Settings.width % Settings.chunkSize == 0)
-		check(Settings.height % Settings.chunkSize == 0)
+        initChunks(screen.width, screen.height)
 
-		toFood = Matrix2D(Settings.width, Settings.height) { _, _ -> null }
-		toFoodIterable = ConcurrentLinkedDeque()
+        repeat(Config.NUM_ANTS) {
+            ants.add(Ant(x.toDouble(), y.toDouble()))
+        }
+    }
 
-		toHome = Matrix2D(Settings.width, Settings.height) { _, _ -> null }
-		toHomeIterable = ConcurrentLinkedDeque()
 
-		foodIterable = LinkedList()
-		food = Matrix2D(Settings.width, Settings.height) { x, y ->
-			if (x in (Settings.height / 8)..(Settings.height * 2 / 8) && (Settings.height / 2) - 60 < y && (Settings.height / 2) + 60 > y) {
-				val f = Food(x, y, 50)
-				foodIterable.add(f)
-				f
-			} else null
-		}
+    fun initChunks(width: Int, height: Int) {
+        var x = 0
+        var y = 0
+        while (y < height) {
+            chunks.add(ArrayList())
+            while (x < width) {
+                val local = Chunk.toLocal(x.toDouble(), y.toDouble())
+                val chunk = Chunk(local.x.toInt(), local.y.toInt())
+                chunks[local.y.toInt()].add(chunk)
+                x += Config.CHUNK_SIZE
+            }
+            x = 0
+            y += Config.CHUNK_SIZE
+        }
 
-		nests = ConcurrentLinkedDeque()
-		nests.add(Nest(Settings.width / 2, Settings.height / 2))
+        chunks.forEach { row -> row.forEach { it.setNabs() } }
+    }
 
-		chunks = Array(chunksX) { x ->
-			Array(chunksY) { y ->
-				val c = Chunk(x, y)
-				if (x == chunksX / 2 && y == chunksY / 2)
-					repeat(Settings.antCount) {
-						c.ants.add(
-							Ant(
-								vec(x.toDouble(), y.toDouble()) * Settings.chunkSize.toDouble(),
-								vec(random.nextDouble() - 0.5, random.nextDouble() - 0.5)
-							)
-						)
-					}
-				c
-			}
-		}
+    fun addTrail(trail: Trail) {
+        val chunk = Chunk.get(trail.x, trail.y)
+        chunk?.let {
+            val trailGridIdx = trail.y.toInt() * width + trail.x.toInt()
+            val existing = trailGrid[trailGridIdx]
+            if (existing != null && existing.type == trail.type) {
+                existing.age -= trail.config.lifetime
+            } else {
+                if (existing != null) {
+                    it.trails.remove(existing)
+                    trails.remove(existing)
+                }
 
-	}
+                it.trails.add(trail)
+                trails.add(trail)
+                trailGrid[trailGridIdx] = trail
 
-	suspend fun tick() {
-		GlobalScope.launch {
-			val addBuffer: Array<Array<MutableList<Ant>>> = Array(chunksX) {
-				Array(chunksY) {
-					LinkedList()
-				}
-			}
-			launch {
-				chunks.forEach { col ->
-					launch {
-						col.forEach { chunk ->
-							launch {
-								chunk.mutex.withLock {
-									chunk.ants.forEach { ant ->
-										ant.tick()
-										ant.chunkCoords().let { (x, y) ->
-											addBuffer[x][y].add(ant)
-										}
-									}
-								}
-							}.join()
-						}
-					}.join()
-				}
-				addBuffer.forEachIndexed { x, arr ->
-					launch {
-						arr.forEachIndexed { y, list ->
-							launch {
-								val c = chunks[x][y]
-								c.mutex.withLock {
-									c.ants = list
-								}
-							}.join()
-						}
-					}.join()
-				}
-			}.join()
-			launch {
-				toFoodIterable.removeIf {
-					it.tick()
-					if (it.intensity <= Settings.pheromoneCutoffIntensity) {
-						toFood[it.x, it.y] = null
-						true
-					} else false
-				}
-			}
-			launch {
-				toHomeIterable.removeIf {
-					it.tick()
-					if (it.intensity <= Settings.pheromoneCutoffIntensity) {
-						toHome[it.x, it.y] = null
-						true
-					} else false
-				}
-			}
-		}.join()
-	}
+                val idx = trail.y.toInt() * width * 4 + trail.x.toInt() * 4
+                trailTextureArr[idx + 0] = (255).toByte()
+                trailTextureArr[idx + 1] = (255).toByte()
+                trailTextureArr[idx + 2] = (255).toByte()
+                trailTextureArr[idx + 3] = (255).toByte()
+            }
+        }
+    }
 
-	suspend fun render(g: Graphics2D) {
-		GlobalScope.launch {
+    @OptIn(DelicateCoroutinesApi::class)
+    fun updateTrails() {
+        val trailUpdateTime = measureTimeMillis {
+            runBlocking {
+                trails.chunked(10000).forEach {
+                    launch {
+                        it.forEach {
+                            if (it.isAlive()) {
+                                it.update()
+                                val idx = it.y.toInt() * width * 4 + it.x.toInt() * 4
+                                trailTextureArr[idx + 3] = (it.lifetime * 255).toInt().toByte()
 
-			// Draw food pheromones
-			launch {
-				if (Settings.drawToFoodPheromone) {
-					synchronized(toFoodIterable) {
-						toFoodIterable.forEach { p -> p.render(g) }
-					}
-				}
-			}
+                                if (!it.isAlive()) {
+                                    trailGrid[it.y.toInt() * width + it.x.toInt()] = null
+                                    trailTextureArr[idx + 0] = 0
+                                    trailTextureArr[idx + 1] = 0
+                                    trailTextureArr[idx + 2] = 0
+                                    trailTextureArr[idx + 3] = 0
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
-			// Draw home pheromones
-			launch {
-				if (Settings.drawToHomePheromone) {
-					synchronized(toHomeIterable) {
-						toHomeIterable.forEach { p -> p.render(g) }
-					}
-				}
-			}
+            if (trailCleanCooldown-- <= 0) {
+                val itt = trails.iterator()
+                while (itt.hasNext()) {
+                    val trail = itt.next()
+                    if (!trail.isAlive()) itt.remove()
+                }
+                trailCleanCooldown = Config.CLEAN_RATE
+            }
+        }
 
-			// Draw food
-			launch {
-				g.new {
-					it.color = Color(100, 255, 40)
-					foodIterable.forEach { f -> it.drawRect(f.x, f.y, 1, 1) }
-				}
-			}
+        println("Trails: ${trailUpdateTime}ms for ${trails.size / 1000}k")
+    }
 
-			// Draw nests
-			launch {
-				g.new {
-					it.color = Color.CYAN
-					nests.forEach { n -> n.render(it) }
-				}
-			}
+    fun drawTrails() {
+        trailBuffer.put(trailTextureArr)
+        trailBuffer.rewind()
 
-			chunks.forEach { col ->
-				launch {
-					col.forEach { chunk ->
-						if (Settings.drawChunks) {
-							g.new {
-								if (chunk.ants.isEmpty())
-									it.color = Color.RED
-								else
-									it.color = Color.GREEN
-								it.drawRect(
-									chunk.x * Settings.chunkSize,
-									chunk.y * Settings.chunkSize,
-									Settings.chunkSize - 1,
-									Settings.chunkSize - 1
-								)
-							}
-						}
-						chunk.mutex.withLock {
-							chunk.ants.forEach { ant ->
-								ant.render(g)
-							}
-						}
-					}
-				}.join()
-			}
-		}.join()
-	}
+        val pixmap = Gdx2DPixmap(
+            trailBuffer,
+            longArrayOf(0, width.toLong(), height.toLong(), Gdx2DPixmap.GDX2D_FORMAT_RGBA8888.toLong())
+        )
+        val texture = Texture(Pixmap(pixmap))
+        val batch = SpriteBatch()
+        val trailDraw = Rectangle(0, 0, width, height)
+        batch.begin()
+        batch.draw(texture, trailDraw.x.toFloat(), trailDraw.y.toFloat())
+        batch.draw(texture, trailDraw.x.toFloat(), trailDraw.y.toFloat())
+        batch.end()
+        texture.dispose()
+    }
 
-	fun getChunk(ant: Ant): Chunk {
-		return ant.chunkCoords().let { (x, y) -> chunks[x][y] }
-	}
+    @OptIn(ExperimentalTime::class, kotlinx.coroutines.DelicateCoroutinesApi::class)
+    fun run(width: Int, height: Int) {
+        this.width = width
+        this.height = height
+        val chunkUpdateTime = measureTimeMillis {
+            val chunkShapeRender = ShapeRenderer()
+            chunkShapeRender.begin(ShapeRenderer.ShapeType.Line)
+            if (Config.DRAW_CHUNKS) chunks.forEach { row -> row.forEach { it.draw(chunkShapeRender) } }
+            chunkShapeRender.end()
+        }
 
-	class Chunk(
-		val x: Int,
-		val y: Int
-	) {
+        updateTrails()
 
-		val mutex: Mutex = Mutex()
-		var ants: MutableList<Ant> = LinkedList()
-		val pheromones: LinkedList<Pheromone> = LinkedList()
+        drawTrails()
 
-		fun forNeighbours(r: Int, func: (Chunk) -> Unit) {
+        val antUpdateTime = measureTimeMillis {
+            val antShapeRender = ShapeRenderer()
+            antShapeRender.begin(ShapeRenderer.ShapeType.Filled)
+            antShapeRender.color = Color(1F, 1F, 1F, 1F)
+            ants.forEach { it.update(width, height, antShapeRender) }
+            antShapeRender.end()
+        }
 
-			val sx = max(x - r, 0)
-			val sy = max(y - r, 0)
-
-			val mx = min(x + r, chunksX - 1)
-			val my = min(y + r, chunksY - 1)
-
-			(sx..mx).forEach { x ->
-				(sy..my).forEach { y ->
-					func.invoke(chunks[x][y])
-				}
-			}
-
-		}
-
-	}
+    }
 
 }
