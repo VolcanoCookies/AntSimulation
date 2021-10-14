@@ -1,4 +1,5 @@
 import com.badlogic.gdx.math.MathUtils.clamp
+import kotlin.math.max
 
 class Trail(val type: TrailType, val x: Double, val y: Double) {
     constructor() : this(TrailType.home, 0.0, 0.0) {
@@ -18,6 +19,7 @@ class Trail(val type: TrailType, val x: Double, val y: Double) {
 
     fun update() {
         age++
+        age = max(age, (-config.lifetime * config.minAgeMult).toInt())
     }
 }
 

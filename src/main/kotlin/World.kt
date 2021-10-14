@@ -4,21 +4,19 @@ import com.badlogic.gdx.graphics.Texture
 import com.badlogic.gdx.graphics.g2d.Gdx2DPixmap
 import com.badlogic.gdx.graphics.g2d.SpriteBatch
 import com.badlogic.gdx.graphics.glutils.ShapeRenderer
-import kotlinx.coroutines.DelicateCoroutinesApi
+import com.badlogic.gdx.math.MathUtils.random
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import ktx.app.KtxGame
 import org.lwjgl.BufferUtils
 import org.lwjgl.util.Rectangle
 import java.nio.ByteBuffer
-import java.util.*
+import kotlin.math.pow
 import kotlin.system.measureTimeMillis
 import kotlin.time.ExperimentalTime
 
-
-fun abgr(color: Color): Color {
-    return Color(color.a, color.b, color.g, color.r)
-}
 
 object World : KtxGame<Screen>() {
     lateinit var screen: Screen
@@ -26,10 +24,9 @@ object World : KtxGame<Screen>() {
     var height: Int = 0
 
     val ants: ArrayList<Ant> = ArrayList()
-    var trails: LinkedList<Trail> = LinkedList()
+    var trails: ParLinkedList<Trail> = ParLinkedList(10000)
     val chunks: ArrayList<ArrayList<Chunk>> = ArrayList()
 
-    var trailCleanCooldown = 0
     lateinit var trailGrid: MutableList<Trail?>
     lateinit var trailTextureArr: ByteArray
     lateinit var trailBuffer: ByteBuffer
@@ -46,12 +43,14 @@ object World : KtxGame<Screen>() {
         trailTextureArr = ByteArray(width * height * 4) { 0 }
         trailBuffer = BufferUtils.createByteBuffer(width * height * 4)
 
-        val x = screen.width / 2
-        val y = screen.height / 2
+//        val x = screen.width / 2
+//        val y = screen.height / 2
 
         initChunks(screen.width, screen.height)
 
         repeat(Config.NUM_ANTS) {
+            val x = random.nextInt(width)
+            val y = random.nextInt(height)
             ants.add(Ant(x.toDouble(), y.toDouble()))
         }
     }
@@ -76,67 +75,75 @@ object World : KtxGame<Screen>() {
     }
 
     fun addTrail(trail: Trail) {
-        val chunk = Chunk.get(trail.x, trail.y)
-        chunk?.let {
-            val trailGridIdx = trail.y.toInt() * width + trail.x.toInt()
-            val existing = trailGrid[trailGridIdx]
-            if (existing != null && existing.type == trail.type) {
-                existing.age -= trail.config.lifetime
-            } else {
-                if (existing != null) {
-                    it.trails.remove(existing)
-                    trails.remove(existing)
-                }
+        val trailGridIdx = trail.y.toInt() * width + trail.x.toInt()
+        if (trailGridIdx < 0 || trailGridIdx > trailGrid.size) return
 
-                it.trails.add(trail)
-                trails.add(trail)
-                trailGrid[trailGridIdx] = trail
-
-                val idx = trail.y.toInt() * width * 4 + trail.x.toInt() * 4
-                trailTextureArr[idx + 0] = (255).toByte()
-                trailTextureArr[idx + 1] = (255).toByte()
-                trailTextureArr[idx + 2] = (255).toByte()
-                trailTextureArr[idx + 3] = (255).toByte()
+        val existing = trailGrid[trailGridIdx]
+        if (existing != null && existing.type == trail.type) {
+            existing.age -= trail.config.lifetime
+        } else {
+            if (existing != null) {
+                existing.age = existing.config.lifetime + 1
             }
+
+            trails.add(trail)
+            trailGrid[trailGridIdx] = trail
+
+            val idx = trail.y.toInt() * width * 4 + trail.x.toInt() * 4
+            val color = trail.config.color
+            trailTextureArr[idx + 0] = (color.r * 255).toInt().toByte()
+            trailTextureArr[idx + 1] = (color.g * 255).toInt().toByte()
+            trailTextureArr[idx + 2] = (color.b * 255).toInt().toByte()
+            trailTextureArr[idx + 3] = (255).toByte()
         }
     }
 
-    @OptIn(DelicateCoroutinesApi::class)
-    fun updateTrails() {
-        val trailUpdateTime = measureTimeMillis {
-            runBlocking {
-                trails.chunked(10000).forEach {
-                    launch {
-                        it.forEach {
-                            if (it.isAlive()) {
-                                it.update()
-                                val idx = it.y.toInt() * width * 4 + it.x.toInt() * 4
-                                trailTextureArr[idx + 3] = (it.lifetime * 255).toInt().toByte()
+    fun doTrailUpdate() = GlobalScope.launch {
+        for (chunk in trails.chunks) {
+            launch {
+                val itt = chunk.iterator()
+                while (itt.hasNext()) {
+                    val trail = itt.next()
+                    if (trail.isAlive()) {
+                        trail.update()
+                        val idx = trail.y.toInt() * width * 4 + trail.x.toInt() * 4
+                        trailTextureArr[idx + 3] = (trail.lifetime.pow(0.4) * 255).toInt().toByte()
 
-                                if (!it.isAlive()) {
-                                    trailGrid[it.y.toInt() * width + it.x.toInt()] = null
-                                    trailTextureArr[idx + 0] = 0
-                                    trailTextureArr[idx + 1] = 0
-                                    trailTextureArr[idx + 2] = 0
-                                    trailTextureArr[idx + 3] = 0
-                                }
-                            }
+                        if (!trail.isAlive()) {
+                            trailGrid[trail.y.toInt() * width + trail.x.toInt()] = null
+                            trailTextureArr[idx + 0] = 0
+                            trailTextureArr[idx + 1] = 0
+                            trailTextureArr[idx + 2] = 0
+                            trailTextureArr[idx + 3] = 0
+                            itt.remove()
                         }
                     }
                 }
             }
-
-            if (trailCleanCooldown-- <= 0) {
-                val itt = trails.iterator()
-                while (itt.hasNext()) {
-                    val trail = itt.next()
-                    if (!trail.isAlive()) itt.remove()
-                }
-                trailCleanCooldown = Config.CLEAN_RATE
-            }
         }
+    }
 
-        println("Trails: ${trailUpdateTime}ms for ${trails.size / 1000}k")
+    fun updateTrails() {
+        runBlocking {
+            doTrailUpdate().job.join()
+            trails.sync()
+        }
+    }
+
+    fun doAntUpdate() = GlobalScope.launch {
+        ants.forEach {
+//            launch {
+//            it.forEach {
+            it.update(width, height)
+//            }
+//            }
+        }
+    }
+
+    fun updateAnts() {
+        runBlocking {
+            doAntUpdate().job.join()
+        }
     }
 
     fun drawTrails() {
@@ -157,29 +164,41 @@ object World : KtxGame<Screen>() {
         texture.dispose()
     }
 
+    fun drawAnts() {
+        if (Config.DRAW_ANTS) {
+            val sensorShapeRender = ShapeRenderer()
+            sensorShapeRender.begin(ShapeRenderer.ShapeType.Line)
+            sensorShapeRender.color = Color(0.4F, 0.4F, 0.4F, 1F)
+
+            val antShapeRender = ShapeRenderer()
+            antShapeRender.begin(ShapeRenderer.ShapeType.Filled)
+            antShapeRender.color = Color(1F, 1F, 1F, 1F)
+
+            ants.forEach {
+                it.draw(antShapeRender, sensorShapeRender)
+            }
+            antShapeRender.end()
+            sensorShapeRender.end()
+        }
+    }
+
     @OptIn(ExperimentalTime::class, kotlinx.coroutines.DelicateCoroutinesApi::class)
     fun run(width: Int, height: Int) {
         this.width = width
         this.height = height
-        val chunkUpdateTime = measureTimeMillis {
+        val frametime = measureTimeMillis {
             val chunkShapeRender = ShapeRenderer()
             chunkShapeRender.begin(ShapeRenderer.ShapeType.Line)
             if (Config.DRAW_CHUNKS) chunks.forEach { row -> row.forEach { it.draw(chunkShapeRender) } }
             chunkShapeRender.end()
+
+            updateTrails()
+            drawTrails()
+            updateAnts()
+            drawAnts()
         }
 
-        updateTrails()
-
-        drawTrails()
-
-        val antUpdateTime = measureTimeMillis {
-            val antShapeRender = ShapeRenderer()
-            antShapeRender.begin(ShapeRenderer.ShapeType.Filled)
-            antShapeRender.color = Color(1F, 1F, 1F, 1F)
-            ants.forEach { it.update(width, height, antShapeRender) }
-            antShapeRender.end()
-        }
-
+        println("Fame time: ${frametime}ms / ${1000 / frametime}fps")
     }
 
 }

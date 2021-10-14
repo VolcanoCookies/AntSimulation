@@ -12,6 +12,7 @@ class Launcher {
             config.title = "Ants"
             config.width = 1600
             config.height = 800
+            config.foregroundFPS = 1000
             LwjglApplication(World, config)
 
         }

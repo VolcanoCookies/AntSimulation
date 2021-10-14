@@ -1,3 +1,4 @@
+import World.height
 import com.badlogic.gdx.graphics.Color
 import com.badlogic.gdx.graphics.glutils.ShapeRenderer
 import kotlin.math.floor
@@ -5,7 +6,7 @@ import kotlin.math.floor
 class Chunk(public val x: Int, public val y: Int) {
     var fill: Boolean = false
     val nabs: ArrayList<Chunk> = ArrayList()
-    var trails: MutableList<Trail> = ArrayList()
+    var trails: MutableList<Trail> = ArrayList(Config.CHUNK_SIZE * Config.CHUNK_SIZE)
 
     fun isIn(x: Double, y: Double): Boolean {
         val local = Chunk.toLocal(x, y)
@@ -15,14 +16,19 @@ class Chunk(public val x: Int, public val y: Int) {
     fun draw(shapeRender: ShapeRenderer) {
         val size = Config.CHUNK_SIZE
         shapeRender.color = Color(0.2F, 0.2F, 0.2F, 1F)
-        shapeRender.rect((x * size).toFloat(), (y * size).toFloat(), size.toFloat(), size.toFloat())
+        shapeRender.rect((x * size).toFloat(), height - ((y + 1) * size).toFloat(), size.toFloat(), size.toFloat())
 
 
         if (fill) {
             val shapeRenderFilled = ShapeRenderer()
             shapeRenderFilled.begin(ShapeRenderer.ShapeType.Filled)
             shapeRenderFilled.color = Color(0.2F, 0.2F, 0.2F, 1F)
-            shapeRenderFilled.rect((x * size).toFloat(), (y * size).toFloat(), size.toFloat(), size.toFloat())
+            shapeRenderFilled.rect(
+                (x * size).toFloat(),
+                height - ((y + 1) * size).toFloat(),
+                size.toFloat(),
+                size.toFloat()
+            )
             shapeRenderFilled.end()
             fill = false
         }
@@ -40,7 +46,6 @@ class Chunk(public val x: Int, public val y: Int) {
     fun getAreaTrails(): MutableList<Trail> {
         val trails: MutableList<Trail> = ArrayList<Trail>().toMutableList()
         nabs.forEach {
-            it.trails = it.trails.filter { trail -> trail.isAlive() }.toMutableList()
             trails += it.trails
         }
         return trails

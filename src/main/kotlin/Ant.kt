@@ -1,17 +1,50 @@
 import World.height
 import com.badlogic.gdx.graphics.glutils.ShapeRenderer
-import kotlin.math.cos
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.sin
+import kotlin.math.*
+
+class SensedComparitor : Comparator<Triple<Sensor, List<Trail>, Double>> {
+    override fun compare(o1: Triple<Sensor, List<Trail>, Double>?, o2: Triple<Sensor, List<Trail>, Double>?): Int {
+        if (o1 != null && o2 != null) {
+            return (o2.third - o1.third).toInt()
+        }
+        return 0
+    }
+}
 
 class Ant(var x: Double, var y: Double) {
     var heading: Double = Math.random() * 360
     var dropCooldown: Int = 0
+    val sensors: Array<Sensor> = arrayOf(
+        Sensor(this, -Config.SENSOR_OFFSET),
+        Sensor(this, 0),
+        Sensor(this, +Config.SENSOR_OFFSET)
+    )
 
+    fun valueTrails(trails: List<Trail>): Double {
+        var sum = 0.0
+        trails.forEach {
+            sum += 1 - max(it.age, 0) / it.config.lifetime
+        }
+        return sum
+    }
 
-    fun draw(shapeRenderer: ShapeRenderer) {
+    fun handleSensors() {
+        val sensed = sensors.map {
+            val trails = it.sense(TrailType.home)
+            Triple(it, trails, valueTrails(trails))
+        }.sortedWith(SensedComparitor())
+        val best = sensed[0]
+//        println(best)
+        if (best.third > Config.TRAIL_MIN_VALUE) {
+            val turnDir = sign(best.first.offset.toDouble())
+            heading += Config.trailConfigs[TrailType.home.ordinal].turnRate * turnDir
+        }
+    }
+
+    fun draw(shapeRenderer: ShapeRenderer, sensorShapeRenderer: ShapeRenderer) {
         shapeRenderer.circle(x.toFloat(), height - y.toFloat(), Config.ANT_SIZE.toFloat())
+        if (Config.DRAW_SENSORS) sensors.forEach { it.draw(sensorShapeRenderer) }
+
     }
 
     fun move(width: Int, height: Int) {
@@ -36,9 +69,9 @@ class Ant(var x: Double, var y: Double) {
         }
     }
 
-    fun update(width: Int, height: Int, shapeRenderer: ShapeRenderer) {
+    fun update(width: Int, height: Int) {
+        handleSensors()
         move(width, height)
-        if (Config.DRAW_ANTS) draw(shapeRenderer)
         Chunk.get(x, y)?.let { it.fill = true }
         heading += (Math.random() * Config.WANDER_POWER * 2) - Config.WANDER_POWER
     }
